@@ -1,0 +1,17 @@
+[Unit]
+Description=Litter Robot Service
+After=network.target
+
+[Service]
+Type=simple
+User=z
+Group=z
+ExecStart=%h/.pyenv/versions/3.11.4/bin/python -u %h/git/PyLitter/litter-robot.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+
