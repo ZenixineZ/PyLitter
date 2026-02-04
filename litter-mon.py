@@ -2,6 +2,7 @@
 """
 Raspberry Pi Webcam Recorder
 Records video from webcam to configurable location with customizable settings
+Automatically splits recordings into 5-minute chunks
 """
 
 import cv2
@@ -43,8 +44,33 @@ def get_fourcc(codec_name):
     }
     return codec_map.get(codec_name, cv2.VideoWriter_fourcc(*'H264'))
 
-def record_video(output_dir, width, height, fps, codec, file_format, camera_index, duration=None, headless=False):
-    """Record video with given configuration"""
+def create_video_writer(output_dir, width, height, fps, codec, file_format, chunk_number=None):
+    """Create a new video writer with timestamped filename"""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    if chunk_number is not None:
+        filename = f"recording_{timestamp}_part{chunk_number:03d}.{file_format}"
+    else:
+        filename = f"recording_{timestamp}.{file_format}"
+    
+    filepath = os.path.join(output_dir, filename)
+    
+    fourcc = get_fourcc(codec)
+    out = cv2.VideoWriter(filepath, fourcc, fps, (width, height))
+    
+    if not out.isOpened():
+        raise Exception(f"Failed to initialize video writer for {filepath}")
+    
+    return out, filepath
+
+def record_video(output_dir, width, height, fps, codec, file_format, camera_index, 
+                duration=None, headless=False, chunk_duration=300):
+    """
+    Record video with given configuration, splitting into chunks
+    
+    Args:
+        chunk_duration: Duration of each chunk in seconds (default: 300 = 5 minutes)
+    """
     
     # Ensure output directory exists
     os.makedirs(output_dir, exist_ok=True)
@@ -61,7 +87,7 @@ def record_video(output_dir, width, height, fps, codec, file_format, camera_inde
     
     # Measure actual FPS by capturing test frames
     print("  Measuring actual camera frame rate...")
-    test_frames = 30
+    test_frames = 60
     start_time = time.time()
     for _ in range(test_frames):
         ret, _ = cap.read()
@@ -72,30 +98,23 @@ def record_video(output_dir, width, height, fps, codec, file_format, camera_inde
     
     print(f"  Measured FPS: {measured_fps:.1f}")
     
-    # Generate filename with timestamp
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"recording_{timestamp}.{file_format}"
-    filepath = os.path.join(output_dir, filename)
-    
-    # Setup video writer with measured FPS
-    fourcc = get_fourcc(codec)
-    out = cv2.VideoWriter(
-        filepath,
-        fourcc,
-        measured_fps,  # Use measured FPS for correct playback speed
-        (actual_width, actual_height)
-    )
-    
-    if not out.isOpened():
-        raise Exception("Failed to initialize video writer")
-    
-    print(f"\nRecording to: {filepath}")
+    print(f"\nRecording will be split into {chunk_duration//60} minute chunks")
     print(f"Press 'q' to stop recording")
     if duration:
-        print(f"Recording for {duration} seconds")
+        print(f"Total recording duration: {duration} seconds")
     
     frame_count = 0
-    start_time = datetime.now()
+    chunk_number = 1
+    chunk_frame_count = 0
+    total_start_time = datetime.now()
+    chunk_start_time = datetime.now()
+    
+    # Create first video writer
+    out, current_filepath = create_video_writer(
+        output_dir, actual_width, actual_height, measured_fps, 
+        codec, file_format, chunk_number
+    )
+    print(f"\nChunk {chunk_number}: {current_filepath}")
     
     try:
         while True:
@@ -139,8 +158,10 @@ def record_video(output_dir, width, height, fps, codec, file_format, camera_inde
                 cv2.LINE_AA
             )
             
+            # Write frame to current video file
             out.write(frame)
             frame_count += 1
+            chunk_frame_count += 1
             
             # Show preview unless headless
             if not headless:
@@ -149,31 +170,70 @@ def record_video(output_dir, width, height, fps, codec, file_format, camera_inde
             # Check for quit (only if showing preview)
             if not headless and cv2.waitKey(1) & 0xFF == ord('q'):
                 break
-            elif headless and duration is None:
-                # In headless mode without duration, need Ctrl+C to stop
-                pass
             
-            # Check duration limit
+            # Check if chunk duration reached
+            chunk_elapsed = (datetime.now() - chunk_start_time).total_seconds()
+            if chunk_elapsed >= chunk_duration:
+                # Close current video writer
+                chunk_duration_actual = (datetime.now() - chunk_start_time).total_seconds()
+                print(f"\nChunk {chunk_number} complete:")
+                print(f"  Duration: {chunk_duration_actual:.1f}s")
+                print(f"  Frames: {chunk_frame_count}")
+                print(f"  File: {current_filepath}")
+                
+                out.release()
+                
+                # Check if total duration is specified and reached
+                total_elapsed = (datetime.now() - total_start_time).total_seconds()
+                if duration and total_elapsed >= duration:
+                    break
+                
+                # Create new video writer for next chunk
+                chunk_number += 1
+                chunk_frame_count = 0
+                chunk_start_time = datetime.now()
+                
+                out, current_filepath = create_video_writer(
+                    output_dir, actual_width, actual_height, measured_fps, 
+                    codec, file_format, chunk_number
+                )
+                print(f"\nChunk {chunk_number}: {current_filepath}")
+            
+            # Check total duration limit
             if duration:
-                elapsed = (datetime.now() - start_time).total_seconds()
-                if elapsed >= duration:
+                total_elapsed = (datetime.now() - total_start_time).total_seconds()
+                if total_elapsed >= duration:
                     break
             
             # Print progress every 30 frames
             if frame_count % 30 == 0:
-                elapsed = (datetime.now() - start_time).total_seconds()
-                print(f"Recorded {frame_count} frames ({elapsed:.1f}s)", end='\r')
+                total_elapsed = (datetime.now() - total_start_time).total_seconds()
+                chunk_elapsed = (datetime.now() - chunk_start_time).total_seconds()
+                chunk_remaining = chunk_duration - chunk_elapsed
+                print(f"Chunk {chunk_number}: {chunk_frame_count} frames, "
+                      f"{chunk_elapsed:.1f}s/{chunk_duration}s "
+                      f"({chunk_remaining:.0f}s remaining) | "
+                      f"Total: {frame_count} frames, {total_elapsed:.1f}s", end='\r')
     
     except KeyboardInterrupt:
-        print("\nRecording interrupted by user")
+        print("\n\nRecording interrupted by user")
     
     finally:
         # Cleanup
-        elapsed = (datetime.now() - start_time).total_seconds()
-        print(f"\n\nRecording complete:")
-        print(f"  Duration: {elapsed:.1f}s")
-        print(f"  Frames: {frame_count}")
-        print(f"  File: {filepath}")
+        total_elapsed = (datetime.now() - total_start_time).total_seconds()
+        chunk_elapsed = (datetime.now() - chunk_start_time).total_seconds()
+        
+        print(f"\n\n{'='*60}")
+        print(f"Recording complete:")
+        print(f"  Total Duration: {total_elapsed:.1f}s")
+        print(f"  Total Frames: {frame_count}")
+        print(f"  Average FPS: {total_elapsed/frame_count:.2f}")
+        print(f"  Total Chunks: {chunk_number}")
+        print(f"\nFinal chunk {chunk_number}:")
+        print(f"  Duration: {chunk_elapsed:.1f}s")
+        print(f"  Frames: {chunk_frame_count}")
+        print(f"  File: {current_filepath}")
+        print(f"{'='*60}")
         
         cap.release()
         out.release()
@@ -181,7 +241,7 @@ def record_video(output_dir, width, height, fps, codec, file_format, camera_inde
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Raspberry Pi Webcam Recorder',
+        description='Raspberry Pi Webcam Recorder with auto-chunking',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     
@@ -207,11 +267,15 @@ def main():
                        type=int,
                        default=0,
                        help='Camera device index')
+    parser.add_argument('--chunk-duration',
+                       type=int,
+                       default=300,
+                       help='Duration of each video chunk in seconds (default: 300 = 5 minutes)')
     
     # Recording control
     parser.add_argument('-d', '--duration',
                        type=int,
-                       help='Recording duration in seconds')
+                       help='Total recording duration in seconds (will be split into chunks)')
     parser.add_argument('--headless',
                        action='store_true',
                        default=True,
@@ -234,6 +298,11 @@ def main():
         print(f"Error: Invalid resolution format '{args.resolution}'. Use WIDTHxHEIGHT (e.g., 1920x1080)")
         return 1
     
+    # Validate chunk duration
+    if args.chunk_duration < 10:
+        print("Error: Chunk duration must be at least 10 seconds")
+        return 1
+    
     # List capabilities
     if args.list:
         print("Run this command to see camera capabilities:")
@@ -249,9 +318,9 @@ def main():
             print("Capturing test frame...")
             ret, frame = cap.read()
             if ret:
-                print(f"✓ Successfully captured {frame.shape[1]}x{frame.shape[0]} frame")
+                print(f"[OK] Successfully captured {frame.shape[1]}x{frame.shape[0]} frame")
             else:
-                print("✗ Failed to capture frame")
+                print("[FAIL] Failed to capture frame")
         else:
             print("Showing preview. Press any key to close...")
             while True:
@@ -272,8 +341,12 @@ def main():
     print(f"  FPS: {args.fps}")
     print(f"  Codec: {args.codec}")
     print(f"  Camera: {args.camera}")
+    print(f"  Chunk Duration: {args.chunk_duration}s ({args.chunk_duration//60} minutes)")
     if args.duration:
-        print(f"  Duration: {args.duration}s")
+        num_chunks = (args.duration + args.chunk_duration - 1) // args.chunk_duration
+        print(f"  Total Duration: {args.duration}s (~{num_chunks} chunks)")
+    else:
+        print(f"  Total Duration: Unlimited (Ctrl+C to stop)")
     if args.headless:
         print(f"  Mode: Headless (no preview)")
     
@@ -286,10 +359,11 @@ def main():
         args.format,
         args.camera,
         args.duration,
-        args.headless
+        args.headless,
+        args.chunk_duration
     )
     
     return 0
 
 if __name__ == "__main__":
-    main()
+    exit(main())
