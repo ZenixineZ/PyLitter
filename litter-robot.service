@@ -4,14 +4,12 @@ After=network.target
 
 [Service]
 Type=simple
-User=z
-Group=z
-ExecStart=/root/.pyenv/versions/3.11.4/bin/python /opt/litter-robot/litter-robot.py
+WorkingDirectory=/opt/litter-robot/
+ExecStart=/root/.pyenv/versions/3.11.4/bin/python -u /opt/litter-robot/litter-robot.py
 Restart=on-failure
 RestartSec=10
-StandardOutput=journal
-StandardError=journal
+StandardOutput=journal+console
+StandardError=journal+console
 
 [Install]
 WantedBy=multi-user.target
-
